@@ -1,0 +1,17 @@
+[Unit]
+Description=VAClaims Bedrock Admin
+After=network.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/opt/bedrock-admin
+Environment=UPLOADS=/srv/vaclaims/uploads
+Environment=BRIEFS=/var/www/html/briefs-stub
+Environment=PUBLIC_BASE=https://vaclaims.online
+ExecStart=/usr/bin/node /opt/bedrock-admin/server.js
+ExecStartPost=-/opt/bedrock-admin/bin/smoke-poststart.sh
+Restart=always
+
+[Install]
+WantedBy=multi-user.target

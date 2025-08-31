@@ -1,0 +1,242 @@
+/* bedrock-admin: upload PDFs → parse → brief → PDF */
+const express = require('express');
+const multer = require('multer');
+const {spawnSync} = require('child_process');
+const fs = require('fs');
+const path = require('path');
+const crypto = require('crypto');
+const PDFDocument = require('pdfkit');
+
+const UPLOADS = process.env.UPLOADS || '/srv/vaclaims/uploads';
+const BRIEFS  = process.env.BRIEFS  || '/var/www/html/briefs-stub';
+const PUBLIC  = process.env.PUBLIC_BASE || 'https://vaclaims.online';
+fs.mkdirSync(UPLOADS, {recursive:true});
+fs.mkdirSync(BRIEFS, {recursive:true});
+
+const app = express();
+app.use(express.json({limit:'25mb'}));
+
+/* ---------- Multer (allow large PDFs) ---------- */
+const storage = multer.diskStorage({
+  destination: (req, file, cb) => cb(null, UPLOADS),
+  filename: (req, file, cb) => cb(null, file.originalname),
+});
+const upload = multer({
+  storage,
+  limits: { fileSize: 200 * 1024 * 1024 } // 200 MB
+});
+
+/* ---------- Helpers ---------- */
+function run(cmd, args){
+  const out = spawnSync(cmd, args, {encoding:'utf8'});
+  if (out.error) throw out.error;
+  if (out.status !== 0) throw new Error(`${cmd} ${args.join(' ')} failed: ${out.stderr}`);
+  return out.stdout;
+}
+
+function extractTextFromPdf(pdfPath, tryOcr){
+  // Try native first
+  const txtPath = pdfPath.replace(/\.pdf$/i, '') + '.txt';
+  try { run('pdftotext', ['-layout', pdfPath, txtPath]); } catch {}
+  let text = '';
+  try { text = fs.readFileSync(txtPath, 'utf8'); } catch {}
+  if (text && text.trim().length >= 20) return text;
+
+  if (tryOcr){
+    // Light OCR fallback (all pages)
+    const tmpDir = path.join(UPLOADS, '.ocr-' + crypto.randomBytes(4).toString('hex'));
+    fs.mkdirSync(tmpDir);
+    try {
+      run('gs', ['-dSAFER','-dBATCH','-dNOPAUSE','-sDEVICE=png16m','-r200',
+                 `-sOutputFile=${path.join(tmpDir,'p%03d.png')}`, pdfPath]);
+      const files = fs.readdirSync(tmpDir).filter(f=>/\.png$/i.test(f)).sort();
+      let ocr = '';
+      for (const f of files){
+        const base = path.join(tmpDir, f.replace(/\.png$/i,''));
+        run('tesseract', [path.join(tmpDir,f), base, '--psm','6','-l','eng']);
+        try { ocr += fs.readFileSync(base + '.txt', 'utf8') + '\n'; } catch {}
+      }
+      if (ocr.trim()) return ocr;
+    } finally {
+      try { fs.rmSync(tmpDir, {recursive:true, force:true}); } catch {}
+    }
+  }
+  return text || '';
+}
+
+
+function redactPII(s){
+  return String(s)
+    .replace(/\b\d{3}[-\s]?\d{2}[-\s]?\d{4}\b/g, "***-**-****")                           // SSN
+    .replace(/\b(DOB|Date of Birth)\s*[:\-]?\s*\d{1,2}[\/\-]\d{1,2}[\/\-]\d{2,4}\b/ig, ": **/**/****") // DOB
+    .replace(/\b\d{1,5}\s+([A-Za-z0-9\.\-]+\s+){1,5}(Ave|Av|Avenue|St|Street|Rd|Road|Blvd|Boulevard|Dr|Drive|Ln|Lane)\b/ig, "*** [address redacted]"); // street addr (rough)
+}
+
+function splitDocsToFacts(text, source){
+  return String(text)
+    .split(/\r?\n/)
+    .map(s=>s.trim())
+    .filter(Boolean)
+    .map(line => ({ source, line: redactPII(line) }))
+    .slice(0, 2000);
+}
+
+/* --- Tiny on-box KB (smoketest) --- */
+const KB = [
+  {type:'cfr', citation:'38 CFR § 3.105(a)', topic:'Revision of decisions', excerpt:'CUE exists where the error is undebatable and would have manifestly changed the outcome.'},
+  {type:'cfr', citation:'38 CFR § 4.16(a)', topic:'TDIU', excerpt:'When unable to secure or follow substantially gainful occupation due to SC disabilities.'},
+  {type:'case', citation:'Roberson v. Principi, 251 F.3d 1378 (Fed. Cir. 2001)', excerpt:'VA must consider TDIU when the record reasonably raises it.'},
+  {type:'m21', citation:'M21-1, V.iii.1', excerpt:'Evaluate SMC incl. A&A and higher levels when criteria met.'}
+];
+const kbSearch = q => (q||'').toLowerCase() && KB.filter(i =>
+  i.citation.toLowerCase().includes(q.toLowerCase()) ||
+  (i.excerpt||'').toLowerCase().includes(q.toLowerCase())
+);
+
+/* ---------- Brief builder ---------- */
+function buildDecisionBrief(claimant, facts){
+  const regs = [
+    ...kbSearch('3.105'),
+    ...kbSearch('4.16'),
+    ...kbSearch('Roberson'),
+    ...kbSearch('M21-1')
+  ];
+  const issues = [
+    {
+      title: 'CUE under 38 CFR § 3.105(a)',
+      evidence: facts.slice(0,10),
+      regs: regs.filter(r=>/3\.105/.test(r.citation)),
+      analysis: 'Record at the time reflects outcome-determinative error.',
+      finding: 'GRANT (subject to effective-date verification).'
+    },
+    {
+      title: 'Inferred TDIU under § 4.16(a)',
+      evidence: facts.slice(10,20),
+      regs: regs.filter(r=>/4\.16|Roberson/.test(r.citation)),
+      analysis: 'Evidence indicates inability to secure/follow substantially gainful occupation.',
+      finding: 'GRANT (schedular/extraschedular as applicable).'
+    }
+  ];
+  return {
+    claimant: { name: claimant?.name || 'Veteran', redactions:['SSN','DOB'] },
+    issues,
+    regs_cited: regs
+  };
+}
+
+/* ---------- PDF assembly ---------- */
+function assemblePdf(brief){
+  const id = 'hlr-cue-' + crypto.randomUUID() + '.pdf';
+  const outPath = path.join(BRIEFS, id);
+  const doc = new PDFDocument({size:'LETTER', margin:48});
+  const stream = fs.createWriteStream(outPath);
+  doc.pipe(stream);
+
+  doc.fontSize(18).text('Higher-Level Review Brief', {align:'center'});
+  doc.moveDown().fontSize(12).text('Claimant: ' + (brief.claimant?.name || 'Veteran'));
+  doc.moveDown().text('Issues:');
+  brief.issues.forEach((it, i)=>{
+    doc.moveDown(0.5).font('Helvetica-Bold').text(`${i+1}. ${it.title}`);
+    doc.font('Helvetica').text('Finding: ' + it.finding);
+    doc.text('Analysis: ' + it.analysis);
+    if (it.evidence?.length){
+      doc.text('Evidence (snippets):');
+      it.evidence.slice(0,6).forEach(e=> doc.text(` • [${e.source}] ${e.line.substring(0,200)}`));
+    }
+  });
+  doc.addPage();
+  doc.font('Helvetica-Bold').text('Authorities Cited:');
+  brief.regs_cited.forEach(r => {
+    doc.moveDown(0.25).font('Helvetica').text(`${r.citation} — ${r.excerpt}`);
+  });
+
+  doc.end();
+  return new Promise(resolve=>{
+    stream.on('finish', ()=> resolve(`${PUBLIC}/briefs-stub/${path.basename(outPath)}`));
+  });
+}
+
+/* ---------- Routes ---------- */
+app.get('/admin/healthz', (req,res)=> res.json({ok:true}));
+
+app.get('/admin/kb-smoketest', (req,res)=>{
+  const q = String(req.query.query||'');
+  const hits = kbSearch(q);
+  res.json({ok:true, query:q, result:{
+    cfr: hits.filter(h=>h.type==='cfr'),
+    m21: hits.filter(h=>h.type==='m21'),
+    precedents: hits.filter(h=>h.type==='case')
+  }});
+});
+
+app.post('/admin/upload', upload.single('file'), (req,res)=>{
+  if (!req.file) return res.status(400).json({ok:false, error:'no_file'});
+  res.json({ok:true, saved_as:req.file.filename, size:req.file.size});
+});
+
+app.post('/admin/run', async (req,res)=>{
+  try{
+    const claimant = req.body?.claimant || {};
+    const files = Array.isArray(req.body?.files) ? req.body.files : [];
+    const tryOcr = !!(req.body?.options && req.body.options.ocr);
+
+    let facts = [];
+    if (files.length){
+      for (const f of files){
+        const p = path.join(UPLOADS, path.basename(f));
+        if (!fs.existsSync(p)) continue;
+        const txt = extractTextFromPdf(p, tryOcr);
+        facts = facts.concat(splitDocsToFacts(txt || '', path.basename(f)));
+      }
+    } else {
+      const stub = [
+        '2004-06-12: PTSD dx; nightmares; GAF 48; unemployed since 2003.',
+        '2005-11-03: Lumbar flexion 30°, MRI L4-5 protrusion; SSA disability.',
+        'Caregiver notes support A&A.'
+      ].join('\n');
+      facts = splitDocsToFacts(stub, 'STUB');
+    }
+
+    const brief = buildDecisionBrief(claimant, facts);
+    const s3_url = await assemblePdf(brief);
+    res.json({ok:true, stages:{stage1:{facts}, stage2:{decision_brief:brief}, stage3:{output:{s3_url}}}, s3_url});
+  }catch(e){
+    res.status(500).json({ok:false, error: e?.message || String(e)});
+  }
+});
+
+const PORT = process.env.PORT || 8082;
+app.listen(PORT,'127.0.0.1',()=> console.log('bedrock-admin listening on http://127.0.0.1:'+PORT));
+
+// --- utility listing endpoints ---
+app.get('/admin/list-uploads', (req,res)=>{
+  try {
+    const rows = fs.readdirSync(UPLOADS)
+      .map(name=>{
+        const s = fs.statSync(path.join(UPLOADS, name));
+        return { name, bytes: s.size, mtime: s.mtime };
+      })
+      .sort((a,b)=> b.mtime - a.mtime);
+    res.json({ok:true, files: rows});
+  } catch(e){
+    res.status(500).json({ok:false, error: e.message});
+  }
+});
+
+app.get('/admin/list-briefs', (req,res)=>{
+  try {
+    const rows = fs.readdirSync(BRIEFS)
+      .filter(n=>/\.pdf$/i.test(n))
+      .map(name=>{
+        const s = fs.statSync(path.join(BRIEFS, name));
+        return {
+          name, bytes: s.size, mtime: s.mtime,
+          url: `${PUBLIC}/briefs-stub/${name}`
+        };
+      })
+      .sort((a,b)=> b.mtime - a.mtime);
+    res.json({ok:true, briefs: rows});
+  } catch(e){
+    res.status(500).json({ok:false, error: e.message});
+  }
+});
