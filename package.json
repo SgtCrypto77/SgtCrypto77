@@ -1,0 +1,30 @@
+{
+  "name": "bedrock-admin",
+  "version": "1.0.0",
+  "description": "Admin service for uploading VA claim PDFs, extracting text (OCR), analyzing decision letters, and generating rebuttal PDFs.",
+  "main": "index.js",
+  "scripts": {
+    "lint": "eslint server.js",
+    "format": "prettier -w .",
+    "smoke": "bash bin/smoke.sh"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/SgtCrypto77/SgtCrypto77.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/SgtCrypto77/SgtCrypto77/issues"
+  },
+  "homepage": "https://github.com/SgtCrypto77/SgtCrypto77#readme",
+  "devDependencies": {
+    "eslint": "^9.34.0",
+    "eslint-config-prettier": "^10.1.8",
+    "eslint-plugin-import": "^2.32.0",
+    "eslint-plugin-node": "^11.1.0",
+    "prettier": "^3.6.2"
+  }
+}
