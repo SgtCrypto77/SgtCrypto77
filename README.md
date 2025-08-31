@@ -1,3 +1,5 @@
+![CI](https://github.com/SgtCrypto77/SgtCrypto77/actions/workflows/ci.yml/badge.svg)
+
 # bedrock-admin (VAClaims)
 
 Admin service for uploading VA claim PDFs, extracting text (OCR), analyzing decision letters,
