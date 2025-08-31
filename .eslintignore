@@ -1,2 +1,4 @@
 server.js
+bedrock-admin/server.js
 **/*.bak.*
+**/server.js
