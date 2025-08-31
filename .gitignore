@@ -1,0 +1,18 @@
+# Node
+node_modules/
+npm-debug.log*
+.pnpm-store/
+dist/
+# Mac & editor
+.DS_Store
+.vscode/
+# Builds & artifacts
+*.tgz
+briefs-stub/
+uploads/
+# Coverage, logs
+coverage/
+logs/
+*.log
+# Runtime
+/tmp/
