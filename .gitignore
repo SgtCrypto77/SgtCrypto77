@@ -16,3 +16,6 @@ logs/
 *.log
 # Runtime
 /tmp/
+# local backups & artifacts
+*.bak*
+*.tgz
