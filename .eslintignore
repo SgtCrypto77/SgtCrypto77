@@ -1,2 +1,7 @@
 server.js
 **/*.bak.*
+
+# ignore nested prod dump
+bedrock-admin/server.js
+**/*.bak.*
+**/server.js
