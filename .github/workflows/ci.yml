@@ -9,5 +9,5 @@ jobs:
         with:
           node-version: '20'
       - run: npm ci || npm i
-      - run: npx eslint server.js
+      - run: npx eslint .
       # optional: if you later add a docker-compose to boot the service, you can run bin/smoke.sh here
