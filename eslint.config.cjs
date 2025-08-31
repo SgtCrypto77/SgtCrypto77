@@ -1,4 +1,11 @@
 module.exports = [{
+  ignores: [
+    "server.js",
+    "bedrock-admin/server.js",
+    "**/*.bak.*",
+    "**/server.js"
+  ]
+}, 
   languageOptions: {
     ecmaVersion: 2021,
     sourceType: 'script',
