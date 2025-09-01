@@ -1,0 +1,10 @@
+name: nightly-eval
+on:
+  schedule:
+    - cron: "17 7 * * *" # daily
+jobs:
+  eval:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: echo "TODO: add de-id sample docs & golden Q/A; compare answers and fail if drift > threshold"
